@@ -13,10 +13,6 @@ let isApiReady = false;
 let proxyIP = "";
 let cachedProxyList = [];
 
-// Variabel untuk Caching Data Proxy
-let lastProxyListRefreshTime = 0;
-const PROXY_LIST_REFRESH_INTERVAL = 3600 * 1000; // Interval refresh cache proxy: 1 jam dalam milidetik
-
 // Constant
 const APP_DOMAIN = `${serviceName}.${rootDomain}`;
 const PORTS = [443, 80];
@@ -39,11 +35,6 @@ const CORS_HEADER_OPTIONS = {
   "Access-Control-Max-Age": "86400",
 };
 
-/**
- * Fungsi untuk mengambil daftar proxy dari KV.
- * @param {string} kvProxyUrl - URL daftar proxy KV.
- * @returns {Promise<object>} Daftar proxy dari KV.
- */
 async function getKVProxyList(kvProxyUrl = KV_PROXY_URL) {
   if (!kvProxyUrl) {
     throw new Error("No KV Proxy URL Provided!");
@@ -57,15 +48,10 @@ async function getKVProxyList(kvProxyUrl = KV_PROXY_URL) {
   }
 }
 
-/**
- * Fungsi untuk mengambil daftar proxy dari sumber utama (PROXY_BANK_URL) dengan caching dan retry logic.
- * Akan me-refresh cache secara berkala.
- * @param {string} proxyBankUrl - URL sumber daftar proxy.
- * @returns {Promise<Array<object>>} Daftar proxy yang di-cache atau yang baru.
- */
 async function getProxyList(proxyBankUrl = PROXY_BANK_URL) {
   /**
    * Format:
+   *
    * <IP>,<Port>,<Country ID>,<ORG>
    * Contoh:
    * 1.1.1.1,443,SG,Cloudflare Inc.
@@ -74,75 +60,27 @@ async function getProxyList(proxyBankUrl = PROXY_BANK_URL) {
     throw new Error("No Proxy Bank URL Provided!");
   }
 
-  const now = Date.now();
-  // Cek apakah cache masih valid (belum kadaluarsa)
-  if (cachedProxyList.length > 0 && (now - lastProxyListRefreshTime < PROXY_LIST_REFRESH_INTERVAL)) {
-    console.log("Menggunakan daftar proxy dari cache.");
-    return cachedProxyList;
+  const proxyBank = await fetch(proxyBankUrl);
+  if (proxyBank.status == 200) {
+    const text = (await proxyBank.text()) || "";
+
+    const proxyString = text.split("\n").filter(Boolean);
+    cachedProxyList = proxyString
+      .map((entry) => {
+        const [proxyIP, proxyPort, country, org] = entry.split(",");
+        return {
+          proxyIP: proxyIP || "Unknown",
+          proxyPort: proxyPort || "Unknown",
+          country: country || "Unknown",
+          org: org || "Unknown Org",
+        };
+      })
+      .filter(Boolean);
   }
-
-  // Implementasi Retry Logic untuk fetching daftar proxy
-  const maxRetries = 3;
-  let retries = 0;
-  let success = false;
-  let text = "";
-
-  while (retries < maxRetries && !success) {
-    try {
-      console.log(`Mencoba mengambil daftar proxy (Percobaan ${retries + 1})...`);
-      const proxyBank = await fetch(proxyBankUrl);
-      if (proxyBank.status == 200) {
-        text = (await proxyBank.text()) || "";
-        success = true;
-        lastProxyListRefreshTime = now; // Perbarui waktu refresh setelah berhasil
-        console.log("Daftar proxy berhasil diambil.");
-      } else {
-        console.error(`Gagal mengambil daftar proxy, status: ${proxyBank.status}.`);
-        retries++;
-        // Exponential backoff: 1s, 2s, 4s, ...
-        await new Promise(resolve => setTimeout(resolve, Math.pow(2, retries) * 1000));
-      }
-    } catch (error) {
-      console.error(`Error saat mengambil daftar proxy: ${error.message}.`);
-      retries++;
-      // Exponential backoff: 1s, 2s, 4s, ...
-      await new Promise(resolve => setTimeout(resolve, Math.pow(2, retries) * 1000));
-    }
-  }
-
-  if (!success) {
-    console.error("Maksimal percobaan tercapai, gagal mengambil daftar proxy.");
-    // Jika gagal setelah beberapa kali percobaan, kembalikan cache lama jika ada
-    if (cachedProxyList.length > 0) {
-      console.log("Mengembalikan daftar proxy dari cache lama karena refresh gagal.");
-      return cachedProxyList;
-    }
-    throw new Error("Gagal mengambil daftar proxy setelah beberapa kali percobaan.");
-  }
-
-  const proxyString = text.split("\n").filter(Boolean);
-  cachedProxyList = proxyString
-    .map((entry) => {
-      const [proxyIP, proxyPort, country, org] = entry.split(",");
-      return {
-        proxyIP: proxyIP || "Unknown",
-        proxyPort: proxyPort || "Unknown",
-        country: country || "Unknown",
-        org: org || "Unknown Org",
-      };
-    })
-    .filter(Boolean);
 
   return cachedProxyList;
 }
 
-/**
- * Fungsi untuk melakukan reverse proxy request.
- * @param {Request} request - Objek Request masuk.
- * @param {string} target - Target host dan port (misal: "example.com:443").
- * @param {string} targetPath - Path target opsional.
- * @returns {Promise<Response>} Objek Response dari target.
- */
 async function reverseProxy(request, target, targetPath) {
   const targetUrl = new URL(request.url);
   const targetChunk = target.split(":");
@@ -166,14 +104,6 @@ async function reverseProxy(request, target, targetPath) {
   return newResponse;
 }
 
-/**
- * Fungsi untuk mendapatkan semua konfigurasi proxy.
- * @param {Request} request - Objek Request.
- * @param {string} hostName - Nama host.
- * @param {Array<object>} proxyList - Daftar proxy.
- * @param {number} page - Nomor halaman.
- * @returns {string} HTML yang berisi konfigurasi proxy.
- */
 function getAllConfig(request, hostName, proxyList, page = 0) {
   const startIndex = PROXY_PER_PAGE * page;
 
@@ -278,8 +208,7 @@ export default {
         }
       }
 
-      // Handle root and sub path
-      if (url.pathname === "/" || url.pathname.startsWith("/sub")) {
+      if (url.pathname.startsWith("/sub")) {
         const page = url.pathname.match(/^\/sub\/(\d+)$/);
         const pageIndex = parseInt(page ? page[1] : "0");
         const hostname = request.headers.get("Host");
@@ -303,7 +232,6 @@ export default {
         });
       } else if (url.pathname.startsWith("/check")) {
         const target = url.searchParams.get("target").split(":");
-        // Menggunakan fungsi checkProxyHealth yang diperbarui dengan retry logic
         const result = await checkProxyHealth(target[0], target[1] || "443");
 
         return new Response(JSON.stringify(result), {
@@ -353,7 +281,6 @@ export default {
           const fillerDomain = url.searchParams.get("domain") || APP_DOMAIN;
 
           const proxyBankUrl = url.searchParams.get("proxy-list") || env.PROXY_BANK_URL;
-          // Menggunakan getProxyList yang sudah di-cache dan memiliki retry logic
           const proxyList = await getProxyList(proxyBankUrl)
             .then((proxies) => {
               // Filter CC
@@ -463,12 +390,10 @@ export default {
         }
       }
 
-      // Jika tidak ada path yang cocok, respons dengan 404 atau halaman kustom.
-      return new Response("Not Found", { status: 404 });
+      const targetReverseProxy = env.REVERSE_PROXY_TARGET || "example.com";
+      return await reverseProxy(request, targetReverseProxy);
     } catch (err) {
-      // Pesan error yang lebih informatif
-      console.error(`Terjadi error di fungsi fetch utama: ${err.message}`, err.stack);
-      return new Response(`Terjadi error: ${err.toString()}`, {
+      return new Response(`An error occurred: ${err.toString()}`, {
         status: 500,
         headers: {
           ...CORS_HEADER_OPTIONS,
@@ -478,12 +403,6 @@ export default {
   },
 };
 
-/**
- * Handler untuk koneksi WebSocket.
- * Mengelola koneksi, deteksi protokol, dan heartbeat.
- * @param {Request} request - Objek Request masuk.
- * @returns {Response} Objek Response WebSocket.
- */
 async function websocketHandler(request) {
   const webSocketPair = new WebSocketPair();
   const [client, webSocket] = Object.values(webSocketPair);
@@ -492,69 +411,10 @@ async function websocketHandler(request) {
 
   let addressLog = "";
   let portLog = "";
-  // Fungsi logging yang lebih informatif
   const log = (info, event) => {
     console.log(`[${addressLog}:${portLog}] ${info}`, event || "");
   };
   const earlyDataHeader = request.headers.get("sec-websocket-protocol") || "";
-
-  let heartbeatInterval;
-  let heartbeatTimeout;
-  const HEARTBEAT_INTERVAL = 30 * 1000; // Kirim ping setiap 30 detik
-  const HEARTBEAT_TIMEOUT = 10 * 1000; // Harapkan pong dalam 10 detik
-
-  /**
-   * Memulai mekanisme heartbeat WebSocket.
-   */
-  const startHeartbeat = () => {
-    heartbeatInterval = setInterval(() => {
-      if (webSocket.readyState === WS_READY_STATE_OPEN) {
-        try {
-          webSocket.send(new Uint8Array([0x9])); // Kirim frame ping (opcode 0x9)
-          heartbeatTimeout = setTimeout(() => {
-            log("WebSocket heartbeat timeout, menutup koneksi.");
-            safeCloseWebSocket(webSocket);
-          }, HEARTBEAT_TIMEOUT);
-        } catch (e) {
-          log(`Error saat mengirim ping heartbeat: ${e.message}`);
-          safeCloseWebSocket(webSocket);
-        }
-      } else {
-        clearInterval(heartbeatInterval);
-        clearTimeout(heartbeatTimeout);
-      }
-    }, HEARTBEAT_INTERVAL);
-  };
-
-  /**
-   * Menghentikan mekanisme heartbeat WebSocket.
-   */
-  const stopHeartbeat = () => {
-    clearInterval(heartbeatInterval);
-    clearTimeout(heartbeatTimeout);
-  };
-
-  // Listener untuk pesan WebSocket (termasuk pong)
-  webSocket.addEventListener("message", (event) => {
-    // Setiap kali ada pesan (termasuk pong), reset timeout heartbeat
-    if (heartbeatTimeout) {
-      clearTimeout(heartbeatTimeout);
-    }
-    // Data pesan akan diproses oleh readableWebSocketStream.pipeTo
-  });
-
-  webSocket.addEventListener("close", () => {
-    stopHeartbeat(); // Pastikan heartbeat berhenti saat WebSocket ditutup
-    safeCloseWebSocket(webSocket);
-  });
-
-  webSocket.addEventListener("error", (err) => {
-    stopHeartbeat(); // Pastikan heartbeat berhenti saat WebSocket error
-    log("WebSocket mengalami error", err);
-  });
-
-  // Mulai heartbeat setelah WebSocket diterima
-  startHeartbeat();
 
   const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
 
@@ -587,33 +447,22 @@ async function websocketHandler(request) {
           } else if (protocol === reverse("skcoswodahS")) {
             protocolHeader = parseSsHeader(chunk);
           } else {
-            // Pesan error yang lebih informatif
-            log(`Protokol tidak dikenal: ${protocol || 'N/A'}. Menutup koneksi.`);
-            safeCloseWebSocket(webSocket);
-            controller.error("Protokol tidak dikenal");
-            return;
+            throw new Error("Unknown Protocol!");
           }
 
           addressLog = protocolHeader.addressRemote;
           portLog = `${protocolHeader.portRemote} -> ${protocolHeader.isUDP ? "UDP" : "TCP"}`;
 
           if (protocolHeader.hasError) {
-            // Pesan error yang lebih informatif
-            log(`Error header protokol: ${protocolHeader.message}. Menutup koneksi.`);
-            safeCloseWebSocket(webSocket);
-            controller.error(protocolHeader.message);
-            return;
+            throw new Error(protocolHeader.message);
           }
 
           if (protocolHeader.isUDP) {
             if (protocolHeader.portRemote === 53) {
               isDNS = true;
             } else {
-              // Pesan error yang lebih informatif
-              log(`UDP hanya mendukung port DNS 53. Port yang diminta: ${protocolHeader.portRemote}. Menutup koneksi.`);
-              safeCloseWebSocket(webSocket);
-              controller.error("UDP hanya mendukung port DNS 53");
-              return;
+              // return handleUDPOutbound(protocolHeader.addressRemote, protocolHeader.portRemote, chunk, webSocket, protocolHeader.version, log);
+              throw new Error("UDP only support for DNS port 53");
             }
           }
 
@@ -639,19 +488,15 @@ async function websocketHandler(request) {
           );
         },
         close() {
-          log(`readableWebSocketStream ditutup`);
-          stopHeartbeat(); // Pastikan heartbeat berhenti saat stream ditutup
+          log(`readableWebSocketStream is close`);
         },
         abort(reason) {
-          log(`readableWebSocketStream dibatalkan`, JSON.stringify(reason));
-          stopHeartbeat(); // Pastikan heartbeat berhenti saat stream dibatalkan
+          log(`readableWebSocketStream is abort`, JSON.stringify(reason));
         },
       })
     )
     .catch((err) => {
       log("readableWebSocketStream pipeTo error", err);
-      stopHeartbeat(); // Pastikan heartbeat berhenti saat ada error pipeTo
-      safeCloseWebSocket(webSocket); // Pastikan WebSocket ditutup saat ada error
     });
 
   return new Response(null, {
@@ -660,11 +505,6 @@ async function websocketHandler(request) {
   });
 }
 
-/**
- * Mengidentifikasi protokol dari buffer data.
- * @param {ArrayBuffer} buffer - Buffer data.
- * @returns {string} Nama protokol yang teridentifikasi.
- */
 async function protocolSniffer(buffer) {
   if (buffer.byteLength >= 62) {
     const najortDelimiter = new Uint8Array(buffer.slice(56, 60));
@@ -686,47 +526,6 @@ async function protocolSniffer(buffer) {
   return reverse("skcoswodahS"); // default
 }
 
-/**
- * Fungsi pembantu untuk mencoba koneksi TCP dengan retry dan exponential backoff.
- * @param {string} address - Alamat target.
- * @param {number} port - Port target.
- * @param {ArrayBuffer} rawClientData - Data klien awal untuk ditulis.
- * @param {number} maxRetries - Jumlah maksimal percobaan.
- * @returns {Promise<WebSocket>} Socket TCP yang terhubung.
- */
-async function retryConnectAndWrite(address, port, rawClientData, maxRetries = 3) {
-  let retries = 0;
-  while (retries < maxRetries) {
-    try {
-      console.log(`Mencoba koneksi ke ${address}:${port} (Percobaan ${retries + 1})...`);
-      const tcpSocket = connect({
-        hostname: address,
-        port: port,
-      });
-      const writer = tcpSocket.writable.getWriter();
-      await writer.write(rawClientData);
-      writer.releaseLock();
-      console.log(`Berhasil terhubung dan menulis ke ${address}:${port}.`);
-      return tcpSocket;
-    } catch (error) {
-      console.error(`Gagal terhubung ke ${address}:${port} (Percobaan ${retries + 1}): ${error.message}`);
-      retries++;
-      await new Promise(resolve => setTimeout(resolve, Math.pow(2, retries) * 1000)); // Exponential backoff
-    }
-  }
-  throw new Error(`Gagal terhubung ke ${address}:${port} setelah ${maxRetries} percobaan.`);
-}
-
-/**
- * Menangani koneksi TCP outbound.
- * @param {object} remoteSocket - Wrapper untuk socket remote.
- * @param {string} addressRemote - Alamat remote.
- * @param {number} portRemote - Port remote.
- * @param {ArrayBuffer} rawClientData - Data klien awal.
- * @param {WebSocket} webSocket - WebSocket klien.
- * @param {Uint8Array} responseHeader - Header respons.
- * @param {function} log - Fungsi logging.
- */
 async function handleTCPOutBound(
   remoteSocket,
   addressRemote,
@@ -736,43 +535,49 @@ async function handleTCPOutBound(
   responseHeader,
   log
 ) {
-  try {
-    // Menggunakan retryConnectAndWrite untuk koneksi awal
-    const tcpSocket = await retryConnectAndWrite(addressRemote, portRemote, rawClientData);
+  async function connectAndWrite(address, port) {
+    const tcpSocket = connect({
+      hostname: address,
+      port: port,
+    });
     remoteSocket.value = tcpSocket;
+    log(`connected to ${address}:${port}`);
+    const writer = tcpSocket.writable.getWriter();
+    await writer.write(rawClientData);
+    writer.releaseLock();
 
+    return tcpSocket;
+  }
+
+  async function retry() {
+    const tcpSocket = await connectAndWrite(
+      proxyIP.split(/[:=-]/)[0] || addressRemote,
+      proxyIP.split(/[:=-]/)[1] || portRemote
+    );
     tcpSocket.closed
       .catch((error) => {
-        console.error(`Socket TCP ke ${addressRemote}:${portRemote} ditutup dengan error:`, error);
+        console.log("retry tcpSocket closed error", error);
       })
       .finally(() => {
         safeCloseWebSocket(webSocket);
       });
-    remoteSocketToWS(tcpSocket, webSocket, responseHeader, log); // Tidak perlu parameter retry di sini
-  } catch (err) {
-    log(`Gagal membuat koneksi TCP: ${err.message}`);
-    safeCloseWebSocket(webSocket);
+    remoteSocketToWS(tcpSocket, webSocket, responseHeader, null, log);
   }
+
+  const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+
+  remoteSocketToWS(tcpSocket, webSocket, responseHeader, retry, log);
 }
 
-/**
- * Menangani koneksi UDP outbound (khusus DNS port 53).
- * @param {string} targetAddress - Alamat target UDP.
- * @param {number} targetPort - Port target UDP.
- * @param {ArrayBuffer} udpChunk - Chunk data UDP.
- * @param {WebSocket} webSocket - WebSocket klien.
- * @param {Uint8Array} responseHeader - Header respons.
- * @param {function} log - Fungsi logging.
- */
 async function handleUDPOutbound(targetAddress, targetPort, udpChunk, webSocket, responseHeader, log) {
   try {
     let protocolHeader = responseHeader;
-    const tcpSocket = connect({ // Menggunakan TCP connect untuk UDP over TCP
+    const tcpSocket = connect({
       hostname: targetAddress,
       port: targetPort,
     });
 
-    log(`Terhubung ke ${targetAddress}:${targetPort} untuk UDP.`);
+    log(`Connected to ${targetAddress}:${targetPort}`);
 
     const writer = tcpSocket.writable.getWriter();
     await writer.write(udpChunk);
@@ -791,28 +596,18 @@ async function handleUDPOutbound(targetAddress, targetPort, udpChunk, webSocket,
           }
         },
         close() {
-          log(`Koneksi UDP ke ${targetAddress} ditutup`);
+          log(`UDP connection to ${targetAddress} closed`);
         },
         abort(reason) {
-          console.error(`Koneksi UDP ke ${targetPort} dibatalkan karena ${reason}`);
+          console.error(`UDP connection to ${targetPort} aborted due to ${reason}`);
         },
       })
     );
   } catch (e) {
-    console.error(`Error saat menangani UDP outbound: ${e.message}`);
-    // Pesan error yang lebih informatif
-    log(`Error saat menangani UDP outbound: ${e.message}`);
-    safeCloseWebSocket(webSocket); // Pastikan WebSocket ditutup saat error UDP
+    console.error(`Error while handling UDP outbound, error ${e.message}`);
   }
 }
 
-/**
- * Membuat ReadableStream dari WebSocket server.
- * @param {WebSocket} webSocketServer - WebSocket server.
- * @param {string} earlyDataHeader - Header data awal.
- * @param {function} log - Fungsi logging.
- * @returns {ReadableStream} ReadableStream dari WebSocket.
- */
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   let readableStreamCancel = false;
   const stream = new ReadableStream({
@@ -822,11 +617,7 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
           return;
         }
         const message = event.data;
-        // Hanya enqueue jika bukan frame kontrol (ping/pong)
-        // Ping/pong akan ditangani oleh listener di websocketHandler
-        if (typeof message !== 'string' || !message.startsWith('__cf_websocket_control')) { // Contoh deteksi frame kontrol
-          controller.enqueue(message);
-        }
+        controller.enqueue(message);
       });
       webSocketServer.addEventListener("close", () => {
         safeCloseWebSocket(webSocketServer);
@@ -836,7 +627,7 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
         controller.close();
       });
       webSocketServer.addEventListener("error", (err) => {
-        log("webSocketServer mengalami error");
+        log("webSocketServer has error");
         controller.error(err);
       });
       const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
@@ -852,7 +643,7 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
       if (readableStreamCancel) {
         return;
       }
-      log(`ReadableStream dibatalkan, karena ${reason}`);
+      log(`ReadableStream was canceled, due to ${reason}`);
       readableStreamCancel = true;
       safeCloseWebSocket(webSocketServer);
     },
@@ -861,11 +652,6 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   return stream;
 }
 
-/**
- * Mengurai header Shadowsocks.
- * @param {ArrayBuffer} ssBuffer - Buffer data Shadowsocks.
- * @returns {object} Objek header Shadowsocks.
- */
 function parseSsHeader(ssBuffer) {
   const view = new DataView(ssBuffer);
 
@@ -896,14 +682,14 @@ function parseSsHeader(ssBuffer) {
     default:
       return {
         hasError: true,
-        message: `Tipe alamat tidak valid untuk ${reverse("skcoswodahS")}: ${addressType}`,
+        message: `Invalid addressType for ${reverse("skcoswodahS")}: ${addressType}`,
       };
   }
 
   if (!addressValue) {
     return {
       hasError: true,
-      message: `Alamat tujuan kosong, tipe alamat: ${addressType}`,
+      message: `Destination address empty, address type is: ${addressType}`,
     };
   }
 
@@ -922,11 +708,6 @@ function parseSsHeader(ssBuffer) {
   };
 }
 
-/**
- * Mengurai header VLESS.
- * @param {ArrayBuffer} buffer - Buffer data VLESS.
- * @returns {object} Objek header VLESS.
- */
 function parseSselvHeader(buffer) {
   const version = new Uint8Array(buffer.slice(0, 1));
   let isUDP = false;
@@ -940,7 +721,7 @@ function parseSselvHeader(buffer) {
   } else {
     return {
       hasError: true,
-      message: `Perintah ${cmd} tidak didukung, perintah 01-tcp,02-udp,03-mux`,
+      message: `command ${cmd} is not support, command 01-tcp,02-udp,03-mux`,
     };
   }
   const portIndex = 18 + optLength + 1;
@@ -955,16 +736,16 @@ function parseSselvHeader(buffer) {
   let addressValueIndex = addressIndex + 1;
   let addressValue = "";
   switch (addressType) {
-    case 1: // Untuk IPv4
+    case 1: // For IPv4
       addressLength = 4;
       addressValue = new Uint8Array(buffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
       break;
-    case 2: // Untuk Domain
+    case 2: // For Domain
       addressLength = new Uint8Array(buffer.slice(addressValueIndex, addressValueIndex + 1))[0];
       addressValueIndex += 1;
       addressValue = new TextDecoder().decode(buffer.slice(addressValueIndex, addressValueIndex + addressLength));
       break;
-    case 3: // Untuk IPv6
+    case 3: // For IPv6
       addressLength = 16;
       const dataView = new DataView(buffer.slice(addressValueIndex, addressValueIndex + addressLength));
       const ipv6 = [];
@@ -976,13 +757,13 @@ function parseSselvHeader(buffer) {
     default:
       return {
         hasError: true,
-        message: `Tipe alamat tidak valid: ${addressType}`,
+        message: `invild  addressType is ${addressType}`,
       };
   }
   if (!addressValue) {
     return {
       hasError: true,
-      message: `Nilai alamat kosong, tipe alamat: ${addressType}`,
+      message: `addressValue is empty, addressType is ${addressType}`,
     };
   }
 
@@ -998,17 +779,12 @@ function parseSselvHeader(buffer) {
   };
 }
 
-/**
- * Mengurai header Trojan.
- * @param {ArrayBuffer} buffer - Buffer data Trojan.
- * @returns {object} Objek header Trojan.
- */
 function parseNajortHeader(buffer) {
   const socks5DataBuffer = buffer.slice(58);
   if (socks5DataBuffer.byteLength < 6) {
     return {
       hasError: true,
-      message: "data permintaan SOCKS5 tidak valid",
+      message: "invalid SOCKS5 request data",
     };
   }
 
@@ -1018,7 +794,7 @@ function parseNajortHeader(buffer) {
   if (cmd == 3) {
     isUDP = true;
   } else if (cmd != 1) {
-    throw new Error("Tipe perintah tidak didukung!");
+    throw new Error("Unsupported command type!");
   }
 
   let addressType = view.getUint8(1);
@@ -1026,20 +802,20 @@ function parseNajortHeader(buffer) {
   let addressValueIndex = 2;
   let addressValue = "";
   switch (addressType) {
-    case 1: // Untuk IPv4
+    case 1: // For IPv4
       addressLength = 4;
       addressValue = new Uint8Array(socks5DataBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(
         "."
       );
       break;
-    case 3: // Untuk Domain
+    case 3: // For Domain
       addressLength = new Uint8Array(socks5DataBuffer.slice(addressValueIndex, addressValueIndex + 1))[0];
       addressValueIndex += 1;
       addressValue = new TextDecoder().decode(
         socks5DataBuffer.slice(addressValueIndex, addressValueIndex + addressLength)
       );
       break;
-    case 4: // Untuk IPv6
+    case 4: // For IPv6
       addressLength = 16;
       const dataView = new DataView(socks5DataBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
       const ipv6 = [];
@@ -1051,14 +827,14 @@ function parseNajortHeader(buffer) {
     default:
       return {
         hasError: true,
-        message: `Tipe alamat tidak valid: ${addressType}`,
+        message: `invalid addressType is ${addressType}`,
       };
   }
 
   if (!addressValue) {
     return {
       hasError: true,
-      message: `Alamat kosong, tipe alamat: ${addressType}`,
+      message: `address is empty, addressType is ${addressType}`,
     };
   }
 
@@ -1077,14 +853,40 @@ function parseNajortHeader(buffer) {
   };
 }
 
-/**
- * Mengalirkan data dari remote socket ke WebSocket.
- * @param {WebSocket} remoteSocket - Socket remote.
- * @param {WebSocket} webSocket - WebSocket klien.
- * @param {Uint8Array} responseHeader - Header respons.
- * @param {function} log - Fungsi logging.
- */
-async function remoteSocketToWS(remoteSocket, webSocket, responseHeader, log) {
+// function parseSsemvHeader(buffer) {
+//   const date = new Date(new Date().toLocaleString("en", { timeZone: "Asia/Jakarta" }));
+//   console.log(`Date: ${date}`);
+//   console.log(`First 16 bytes: ${arrayBufferToHex(buffer.slice(0, 17))}`);
+//   console.log(`Remaining bytes: ${arrayBufferToHex(buffer.slice(17))}`);
+
+//   // ===== KEY GENERATION =====
+//   const userId = "3b670322-6ac1-41ec-9ff3-714245d41bf7";
+//   const uuidConst = "c48619fe-8f02-49e0-b9e9-edf763e17e21";
+
+//   // Step 1: Generate AES key
+//   const key = createHash("md5")
+//     .update(userId + uuidConst)
+//     .digest();
+//   console.log(`KEY: ${key}`);
+
+//   // Step 2: Generate Timestamp (current Unix time)
+//   const timestamp = Math.floor(date.getTime() / 1000); // current timestamp in seconds
+
+//   // Step 3: Generate IV from Timestamp
+//   const x = Buffer.alloc(8);
+//   x.writeBigUInt64BE(BigInt(timestamp)); // 8-byte timestamp (Big Endian)
+//   const iv_source = Buffer.concat([x, x, x, x]);
+//   const iv = createHash("md5").update(iv_source).digest();
+//   console.log(`IV: ${iv}`);
+
+//   // Step 4: Decrypt using AES-128-CFB
+//   const decipher = createDecipheriv("aes-128-cfb", key, iv);
+//   const decrypted = Buffer.concat([decipher.update(buffer.slice(17)), decipher.final()]);
+
+//   console.log(`Decrypted Header: ${decrypted.toString("hex")}`);
+// }
+
+async function remoteSocketToWS(remoteSocket, webSocket, responseHeader, retry, log) {
   let header = responseHeader;
   let hasIncomingData = false;
   await remoteSocket.readable
@@ -1094,8 +896,7 @@ async function remoteSocketToWS(remoteSocket, webSocket, responseHeader, log) {
         async write(chunk, controller) {
           hasIncomingData = true;
           if (webSocket.readyState !== WS_READY_STATE_OPEN) {
-            controller.error("WebSocket tidak terbuka, mungkin sudah ditutup.");
-            return;
+            controller.error("webSocket.readyState is not open, maybe close");
           }
           if (header) {
             webSocket.send(await new Blob([header, chunk]).arrayBuffer());
@@ -1105,79 +906,39 @@ async function remoteSocketToWS(remoteSocket, webSocket, responseHeader, log) {
           }
         },
         close() {
-          log(`Aliran baca koneksi remote ditutup. Memiliki data masuk: ${hasIncomingData}`);
+          log(`remoteConnection!.readable is close with hasIncomingData is ${hasIncomingData}`);
         },
         abort(reason) {
-          console.error(`Aliran baca koneksi remote dibatalkan:`, reason);
+          console.error(`remoteConnection!.readable abort`, reason);
         },
       })
     )
-    .catch(async (error) => {
-      console.error(`Error saat mem-pipe remote socket ke WebSocket:`, error.stack || error);
-      log(`Error saat mem-pipe remote socket ke WebSocket: ${error.message}`);
+    .catch((error) => {
+      console.error(`remoteSocketToWS has exception `, error.stack || error);
       safeCloseWebSocket(webSocket);
     });
+  if (hasIncomingData === false && retry) {
+    log(`retry`);
+    retry();
+  }
 }
 
-/**
- * Menutup WebSocket dengan aman.
- * @param {WebSocket} socket - WebSocket yang akan ditutup.
- */
 function safeCloseWebSocket(socket) {
   try {
     if (socket.readyState === WS_READY_STATE_OPEN || socket.readyState === WS_READY_STATE_CLOSING) {
       socket.close();
     }
   } catch (error) {
-    console.error("Error saat menutup WebSocket dengan aman:", error);
+    console.error("safeCloseWebSocket error", error);
   }
 }
 
-/**
- * Mengecek kesehatan proxy dengan retry logic.
- * @param {string} proxyIP - IP proxy.
- * @param {string} proxyPort - Port proxy.
- * @returns {Promise<object>} Hasil cek kesehatan proxy.
- */
 async function checkProxyHealth(proxyIP, proxyPort) {
-  const maxRetries = 3;
-  let retries = 0;
-  let success = false;
-  let result = {};
-
-  while (retries < maxRetries && !success) {
-    try {
-      console.log(`Mengecek kesehatan proxy ${proxyIP}:${proxyPort} (Percobaan ${retries + 1})...`);
-      const req = await fetch(`${PROXY_HEALTH_CHECK_API}?ip=${proxyIP}:${proxyPort}`);
-      if (req.status == 200) {
-        result = await req.json();
-        success = true;
-        console.log(`Cek kesehatan proxy ${proxyIP}:${proxyPort} berhasil.`);
-      } else {
-        console.error(`Cek kesehatan gagal untuk ${proxyIP}:${proxyPort}, status: ${req.status}.`);
-        retries++;
-        await new Promise(resolve => setTimeout(resolve, Math.pow(2, retries) * 1000)); // Exponential backoff
-      }
-    } catch (error) {
-      console.error(`Error saat cek kesehatan untuk ${proxyIP}:${proxyPort}: ${error.message}.`);
-      retries++;
-      await new Promise(resolve => setTimeout(resolve, Math.pow(2, retries) * 1000)); // Exponential backoff
-    }
-  }
-
-  if (!success) {
-    console.error(`Maksimal percobaan tercapai, cek kesehatan gagal untuk ${proxyIP}:${proxyPort}.`);
-    return { proxyip: false, delay: -1, colo: "N/A", error: "Cek kesehatan gagal" };
-  }
-  return result;
+  const req = await fetch(`${PROXY_HEALTH_CHECK_API}?ip=${proxyIP}:${proxyPort}`);
+  return await req.json();
 }
 
 // Helpers
-/**
- * Mengkonversi string Base64 ke ArrayBuffer.
- * @param {string} base64Str - String Base64.
- * @returns {{earlyData: ArrayBuffer|null, error: Error|null}} Objek yang berisi data atau error.
- */
 function base64ToArrayBuffer(base64Str) {
   if (!base64Str) {
     return { error: null };
@@ -1192,19 +953,10 @@ function base64ToArrayBuffer(base64Str) {
   }
 }
 
-/**
- * Mengkonversi ArrayBuffer ke string heksadesimal.
- * @param {ArrayBuffer} buffer - ArrayBuffer.
- * @returns {string} String heksadesimal.
- */
 function arrayBufferToHex(buffer) {
   return [...new Uint8Array(buffer)].map((x) => x.toString(16).padStart(2, "0")).join("");
 }
 
-/**
- * Mengacak elemen dalam array.
- * @param {Array<any>} array - Array yang akan diacak.
- */
 function shuffleArray(array) {
   let currentIndex = array.length;
 
@@ -1219,11 +971,6 @@ function shuffleArray(array) {
   }
 }
 
-/**
- * Menghasilkan hash MD5 dari teks.
- * @param {string} text - Teks input.
- * @returns {Promise<string>} Hash MD5 dalam format heksadesimal.
- */
 async function generateHashFromText(text) {
   const msgUint8 = new TextEncoder().encode(text); // encode as (utf-8) Uint8Array
   const hashBuffer = await crypto.subtle.digest("MD5", msgUint8); // hash the message
@@ -1233,20 +980,10 @@ async function generateHashFromText(text) {
   return hashHex;
 }
 
-/**
- * Membalikkan string.
- * @param {string} s - String input.
- * @returns {string} String yang dibalikkan.
- */
 function reverse(s) {
   return s.split("").reverse().join("");
 }
 
-/**
- * Mendapatkan emoji bendera berdasarkan kode ISO negara.
- * @param {string} isoCode - Kode ISO negara (misal: "ID", "SG").
- * @returns {string} Emoji bendera.
- */
 function getFlagEmoji(isoCode) {
   const codePoints = isoCode
     .toUpperCase()
