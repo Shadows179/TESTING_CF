@@ -1,5 +1,3 @@
-
-
 import { connect } from "cloudflare:sockets";
 // import { createHash, createDecipheriv } from "node:crypto";
 // import { Buffer } from "node:buffer";
@@ -280,7 +278,8 @@ export default {
         }
       }
 
-      if (url.pathname.startsWith("/sub")) {
+      // Handle root and sub path
+      if (url.pathname === "/" || url.pathname.startsWith("/sub")) {
         const page = url.pathname.match(/^\/sub\/(\d+)$/);
         const pageIndex = parseInt(page ? page[1] : "0");
         const hostname = request.headers.get("Host");
@@ -464,8 +463,8 @@ export default {
         }
       }
 
-      const targetReverseProxy = env.REVERSE_PROXY_TARGET || "example.com";
-      return await reverseProxy(request, targetReverseProxy);
+      // Jika tidak ada path yang cocok, respons dengan 404 atau halaman kustom.
+      return new Response("Not Found", { status: 404 });
     } catch (err) {
       // Pesan error yang lebih informatif
       console.error(`Terjadi error di fungsi fetch utama: ${err.message}`, err.stack);
